@@ -1,0 +1,13 @@
+{
+  "name": "tasker",
+  "version": "4.1.8-modular",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  }
+}
