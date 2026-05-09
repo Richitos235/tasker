@@ -150,9 +150,9 @@ export function installConsumables() {
     );
   };
 
-  // Alias for manual scanning
   Dobby.Consumables = Dobby.Consumables || {};
   Dobby.Consumables.scan = function() {
+    Dobby._log("Manual scan initiated");
     Dobby.findAllConsumables();
   };
 
@@ -313,8 +313,6 @@ export function installConsumables() {
       if (this.initialized) return;
       this.initialized = true;
       
-      // Optimization: Removed the setInterval that was spamming Bag.search
-      // The watcher now only triggers tryUse which checks vitals before searching
       try { this.startWatcher(); } catch {}
       
       waitForBagReady(() => {

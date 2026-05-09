@@ -13,16 +13,23 @@ export function installJobs() {
 
   Dobby._ensureJobPrototype = function (job) {
     if (!job || typeof job !== 'object') return job;
-    // Ensure the object has the calculateDistance method from JobPrototype
     if (typeof job.calculateDistance !== 'function') {
       try {
         Object.setPrototypeOf(job, JobPrototype.prototype);
       } catch (e) {
-        // Fallback: manually attach the method if prototype setting fails
         job.calculateDistance = JobPrototype.prototype.calculateDistance;
       }
     }
     return job;
+  };
+
+  Dobby._moveJob = function (fromIndex, toIndex) {
+    if (fromIndex < 0 || fromIndex >= Dobby.addedJobs.length) return;
+    if (toIndex < 0 || toIndex >= Dobby.addedJobs.length) return;
+    const item = Dobby.addedJobs.splice(fromIndex, 1)[0];
+    Dobby.addedJobs.splice(toIndex, 0, item);
+    Dobby._persist();
+    Dobby.render();
   };
 
   Dobby._ensureRepeatState = function () {
@@ -47,8 +54,6 @@ export function installJobs() {
     }
     return -1;
   };
-
-  Dobby._cleanupFinishedJobsOptional = function () {};
 
   Dobby.loadJobData = function (cb) {
     Ajax.get('work', 'index', {}, function (r) {
@@ -95,7 +100,7 @@ export function installJobs() {
   Dobby.getAllUniqueJobs = function () {
     const filter = (Dobby.ui.filter || '').toLowerCase();
     for (const j of Dobby.allJobs) {
-      Dobby._ensureJobPrototype(j);
+      if (typeof j.calculateDistance !== 'function') Object.setPrototypeOf(j, JobPrototype.prototype);
       j.calculateDistance();
     }
     const bestById = new Map();
@@ -135,11 +140,8 @@ export function installJobs() {
   Dobby.createRoute = function () {
     if (!Dobby.addedJobs.length) return;
     for (const j of Dobby.addedJobs) {
-      // Fix: Ensure prototype is set before calling calculateDistance
-      Dobby._ensureJobPrototype(j);
-      if (typeof j.calculateDistance === 'function') {
-        j.calculateDistance();
-      }
+      if (typeof j.calculateDistance !== 'function') Object.setPrototypeOf(j, JobPrototype.prototype);
+      j.calculateDistance();
     }
     let start = 0;
     for (let i = 1; i < Dobby.addedJobs.length; i++) {
@@ -166,6 +168,13 @@ export function installJobs() {
   Dobby.getJobMotivation = function (job) {
     return new Promise((resolve) => {
       Ajax.get('job', 'job', { jobId: job.id, x: job.x, y: job.y }, function (r) {
+        if (r?.error && String(r.msg).toLowerCase().includes('session')) {
+          Dobby._log('❌ SESSION EXPIRED: Stopping script.');
+          safeUserMsg('Invalid session! Refresh the page to capture a new token.', window.UserMessage?.TYPE_ERROR);
+          Dobby.stop();
+          resolve(0);
+          return;
+        }
         resolve((r?.motivation || 0) * 100);
       });
     });
@@ -363,12 +372,11 @@ export function installJobs() {
       const result = await Dobby._post('/game.php?window=task&action=add&h=' + (Dobby.settings.hToken || ''), payload);
 
       if (result && !result.error) {
-        // Extract duration and provide feedback
         const duration = result.tasks?.[0]?.task?.data_obj?.duration;
         if (duration) {
-          const mins = Math.floor(duration / 60);
-          Dobby._log(`Travel time to town: ${mins} minutes.`);
-          safeUserMsg(`Traveling to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
+          const mins = Math.round(duration / 60);
+          Dobby._log(`Walking to town. Arrival in ${mins} minutes.`);
+          safeUserMsg(`Walking to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
         }
 
         let dateDone = result.tasks?.[0]?.task?.date_done;

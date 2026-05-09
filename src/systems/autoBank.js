@@ -53,12 +53,11 @@ export function installAutoBank() {
       const walkRes = await Dobby._post(Dobby._withH('window=task&action=add'), walkBody);
 
       if (walkRes && !walkRes.error) {
-        // Extract duration and provide feedback
         const duration = walkRes.tasks?.[0]?.task?.data_obj?.duration;
         if (duration) {
-          const mins = Math.floor(duration / 60);
-          Dobby._log(`Banking travel time: ${mins} minutes.`);
-          safeUserMsg(`Banking: Traveling to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
+          const mins = Math.round(duration / 60);
+          Dobby._log(`Walking to town. Arrival in ${mins} minutes.`);
+          safeUserMsg(`Walking to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
         }
 
         let dateDone = walkRes.tasks?.[0]?.task?.date_done;
