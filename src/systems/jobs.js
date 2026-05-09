@@ -13,8 +13,14 @@ export function installJobs() {
 
   Dobby._ensureJobPrototype = function (job) {
     if (!job || typeof job !== 'object') return job;
+    // Ensure the object has the calculateDistance method from JobPrototype
     if (typeof job.calculateDistance !== 'function') {
-      try { Object.setPrototypeOf(job, JobPrototype.prototype); } catch {}
+      try {
+        Object.setPrototypeOf(job, JobPrototype.prototype);
+      } catch (e) {
+        // Fallback: manually attach the method if prototype setting fails
+        job.calculateDistance = JobPrototype.prototype.calculateDistance;
+      }
     }
     return job;
   };
@@ -129,8 +135,11 @@ export function installJobs() {
   Dobby.createRoute = function () {
     if (!Dobby.addedJobs.length) return;
     for (const j of Dobby.addedJobs) {
+      // Fix: Ensure prototype is set before calling calculateDistance
       Dobby._ensureJobPrototype(j);
-      j.calculateDistance();
+      if (typeof j.calculateDistance === 'function') {
+        j.calculateDistance();
+      }
     }
     let start = 0;
     for (let i = 1; i < Dobby.addedJobs.length; i++) {
@@ -347,102 +356,52 @@ export function installJobs() {
     if (!Dobby._alive(token)) return;
 
     if (job.isTownWalk) {
-      // Handle town walk task
       const jobName = Dobby.getDisplayName(job);
-      let info = ` to town ${job.unitId}`;
-      if (Number.isFinite(job.x) && Number.isFinite(job.y) && (job.x !== 0 || job.y !== 0)) {
-        info += ` coords=(${job.x},${job.y})`;
-        try {
-          const dist = GameMap.calcWayTime(Character.position, { x: job.x, y: job.y });
-          if (dist != null) info += ` dist=${dist.formatDuration ? dist.formatDuration() : dist}`;
-        } catch {}
-      }
-      Dobby._log(`WALK: Starting "${jobName}"${info}`);
+      Dobby._log(`WALK: Starting "${jobName}" to town ${job.unitId}`);
 
       const payload = `tasks[0][unitId]=${job.unitId}&tasks[0][type]=town&tasks[0][taskType]=walk`;
       const result = await Dobby._post('/game.php?window=task&action=add&h=' + (Dobby.settings.hToken || ''), payload);
 
-      if (result && result.ok) {
-        Dobby._log(`WALK: Successfully queued walk to "${jobName}"`);
-        let travelHint = '';
-        const taskData = result.tasks?.[0]?.task;
-        const dataObj = taskData?.data_obj;
-        if (dataObj) {
-          const durationSeconds = Number(dataObj.duration ?? dataObj.durationSeconds ?? dataObj.time);
-          if (Number.isFinite(durationSeconds) && durationSeconds > 0) {
-            const mins = Math.floor(durationSeconds / 60);
-            const secs = Math.round(durationSeconds % 60);
-            travelHint += ` Travel time: ${mins}m ${secs}s`;
-          }
-          const coords = dataObj.coords || dataObj.coord || dataObj.coordinates;
-          if (coords) {
-            travelHint += ` coords=${typeof coords === 'string' ? coords : JSON.stringify(coords)}`;
-          }
-        }
-        safeUserMsg(`Walk queued: ${jobName}${travelHint ? ' —' + travelHint : ''}`, window.UserMessage?.TYPE_HINT);
-
-        let dateDone = null;
-        let dateStart = null;
-        if (result.tasks?.[0]?.task) {
-          const taskData = result.tasks[0].task;
-          dateDone = taskData.date_done ?? taskData.dateDone ?? taskData.date_done_at;
-          dateStart = taskData.date_start ?? taskData.dateStart;
-        }
-        if (!dateDone && result.data?.tasks?.[0]?.task) {
-          const taskData = result.data.tasks[0].task;
-          dateDone = taskData.date_done ?? taskData.dateDone ?? taskData.date_done_at;
-          dateStart = taskData.date_start ?? taskData.dateStart;
+      if (result && !result.error) {
+        // Extract duration and provide feedback
+        const duration = result.tasks?.[0]?.task?.data_obj?.duration;
+        if (duration) {
+          const mins = Math.floor(duration / 60);
+          Dobby._log(`Travel time to town: ${mins} minutes.`);
+          safeUserMsg(`Traveling to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
         }
 
+        let dateDone = result.tasks?.[0]?.task?.date_done;
         let waitMs = 0;
         if (dateDone) {
-          const doneTs = Number(dateDone) || Date.parse(dateDone);
-          const startTs = Number(dateStart) || Date.parse(dateStart);
-          if (Number.isFinite(doneTs)) {
-            if (Number.isFinite(startTs) && doneTs > startTs) {
-              waitMs = Math.max(0, doneTs - startTs);
-            } else {
-              waitMs = Math.max(0, doneTs - Date.now());
-            }
-          }
+          const doneTs = Number(dateDone) * 1000;
+          waitMs = Math.max(0, doneTs - Date.now());
         }
 
         if (waitMs > 0) {
-          Dobby.nextActionAt = Date.now() + waitMs;
           Dobby.currentState = 'walking';
-          Dobby._log(`WALK: waiting ${Math.round(waitMs / 1000)}s until arrival.`);
           await sleep(waitMs);
         }
 
-        // Remove the task from queue
         const idx = Dobby.addedJobs.indexOf(job);
         if (idx >= 0) Dobby.addedJobs.splice(idx, 1);
         if (Dobby.currentJobIndex >= idx && Dobby.currentJobIndex > 0) Dobby.currentJobIndex--;
         Dobby._persist();
 
-        if (waitMs > 0) {
-          Dobby.currentState = 'running';
-        }
-
-        // Proceed to next job
+        Dobby.currentState = 'running';
         const ni = Dobby._nextJobIndex();
         if (ni === -1) {
           safeUserMsg('All tasks finished.', window.UserMessage?.TYPE_HINT);
-          Dobby._log('STOP: all tasks finished.');
           Dobby.stop();
           return;
         }
         Dobby.run(token);
         return;
       } else {
-        Dobby._log(`WALK: Failed to queue walk to "${jobName}": ${result?.error || 'Unknown error'}`);
+        Dobby._log(`WALK: Failed to queue walk to "${jobName}": ${result?.msg || 'Unknown error'}`);
         safeUserMsg(`Walk failed: ${jobName}`, window.UserMessage?.TYPE_ERROR);
-        // Skip this task and proceed
         const ni = Dobby._nextJobIndex();
-        if (ni === -1) {
-          Dobby.stop();
-          return;
-        }
+        if (ni === -1) { Dobby.stop(); return; }
         Dobby.run(token);
         return;
       }
@@ -477,8 +436,6 @@ export function installJobs() {
     if (workingSet >= 0) {
       Dobby._log(`EQUIP: Working set "${Dobby.getSetName(workingSet)}" before job.`);
       await Dobby.equipSet(workingSet, token);
-    } else {
-      Dobby._log('EQUIP: No Working set configured, keeping current gear.');
     }
     if (!Dobby._alive(token)) return;
 
@@ -497,10 +454,7 @@ export function installJobs() {
     const beforeQ = Dobby._queueLen();
     const rptTot = Number(job.repeatTotal || 0);
     const rptRem = rptTot > 0 ? Number(job.repeatRemaining ?? rptTot) : 0;
-    Dobby._log(
-      `QUEUE: "${jobName}" x${jobCount} (mot=${motBefore.toFixed(0)} limit=${job.stopMotivation})` +
-        (rptTot > 0 ? ` | repeats: ${rptRem}/${rptTot}` : ` | repeats: ∞`)
-    );
+    Dobby._log(`QUEUE: "${jobName}" x${jobCount} (mot=${motBefore.toFixed(0)})` + (rptTot > 0 ? ` | repeats: ${rptRem}/${rptTot}` : ` | repeats: ∞`));
 
     let firstJobResult = null;
     if (Dobby.settings.hToken) {
@@ -512,11 +466,8 @@ export function installJobs() {
       const isLevelError = Dobby._isLabourError(errMsg);
 
       if (isLevelError && backupSet >= 0) {
-        Dobby._log('[Tasker] Job failed due to insufficient labour points');
-        Dobby._log(`[Tasker] Job: "${jobName}"`);
-        Dobby._log(`[Tasker] Equipped set: Working set "${Dobby.getSetName(workingSet)}"`);
-        Dobby._log(`[Tasker] Switching to Back Up set "${Dobby.getSetName(backupSet)}"`);
-        safeUserMsg(`⚠️ Labour/level error! Retrying with backup set...`, window.UserMessage?.TYPE_HINT);
+        Dobby._log(`⚠️ Labour error! Retrying with backup set "${Dobby.getSetName(backupSet)}"`);
+        safeUserMsg(`⚠️ Labour error! Retrying with backup set...`, window.UserMessage?.TYPE_HINT);
 
         await Dobby.equipSet(backupSet, token);
         if (!Dobby._alive(token)) return;
@@ -525,52 +476,31 @@ export function installJobs() {
         const retryResult = await Dobby._startJobViaAPI(job, 15);
 
         if (retryResult && retryResult.error) {
-          Dobby._log(`❌ Back Up set also failed: ${retryResult.msg}. Skipping job safely.`);
+          Dobby._log(`❌ Backup set failed: ${retryResult.msg}. Skipping.`);
           safeUserMsg(`❌ Backup set failed too! Skipping "${jobName}"`, window.UserMessage?.TYPE_ERROR);
           if (workingSet >= 0) await Dobby.equipSet(workingSet, token);
           const ni = Dobby._nextJobIndex();
-          Dobby._persist();
           if (ni === -1) { Dobby.stop(); return; }
-          Dobby.render();
           Dobby.run(token);
           return;
         }
 
-        Dobby._log('✅ Back Up set successfully completed job.');
-        safeUserMsg(`✅ Backup set worked for "${jobName}"`, window.UserMessage?.TYPE_HINT);
+        Dobby._log('✅ Backup set worked.');
         usedBackupSet = true;
         jobCount = 1;
 
         const t0 = Date.now();
         while (Date.now() - t0 < 600000) {
           if (!Dobby._alive(token)) return;
-          if (Dobby.healthBelowLimit()) {
-            Dobby._log('STOP: health below limit (during queue).');
-            Dobby.stop();
-            return;
-          }
           if (TaskQueue.queue.length === 0) break;
           await sleep(250);
         }
-
-        Dobby._log(`🔄 Switching back from Back Up set to Working set "${Dobby.getSetName(workingSet)}".`);
         if (workingSet >= 0) await Dobby.equipSet(workingSet, token);
 
-      } else if (isLevelError && backupSet < 0) {
-        Dobby._log(`[Tasker] Job failed due to insufficient labour points: ${errMsg}. No backup set configured. Skipping safely.`);
-        safeUserMsg(`⚠️ Level error! Configure Backup Set in Sets tab.`, window.UserMessage?.TYPE_ERROR);
-        const ni = Dobby._nextJobIndex();
-        Dobby._persist();
-        if (ni === -1) { Dobby.stop(); return; }
-        Dobby.render();
-        Dobby.run(token);
-        return;
       } else {
         Dobby._log(`❌ Job error on "${jobName}": ${errMsg}. Skipping.`);
         const ni = Dobby._nextJobIndex();
-        Dobby._persist();
         if (ni === -1) { Dobby.stop(); return; }
-        Dobby.render();
         Dobby.run(token);
         return;
       }
@@ -591,40 +521,25 @@ export function installJobs() {
     }
 
     if (!usedBackupSet) {
-      Dobby.currentState = 'running';
-      Dobby.render();
       const t0 = Date.now();
       while (Date.now() - t0 < 600000) {
         if (!Dobby._alive(token)) return;
-        if (Dobby.healthBelowLimit()) {
-          safeUserMsg('Stop: health below limit.', window.UserMessage?.TYPE_ERROR);
-          Dobby._log('STOP: health below limit (during queue).');
-          Dobby.stop();
-          return;
-        }
         if (TaskQueue.queue.length === 0) break;
         await sleep(250);
       }
     }
 
     const done = Math.max(0, usedBackupSet ? 1 : (beforeQ + jobCount - Dobby._queueLen()));
-    Dobby.statistics.jobsInSession += done;
     Dobby.statistics.totalJobs += done;
     const gained = Math.max(0, Character.experience - beforeXP);
-    Dobby.statistics.xpInSession += gained;
     Dobby.statistics.totalXp += gained;
     if (Number(job.repeatTotal || 0) > 0) {
-      const tot = Number(job.repeatTotal || 0);
-      const rem0 = Number(job.repeatRemaining ?? tot);
-      const rem1 = Math.max(0, rem0 - 1);
-      job.repeatRemaining = rem1;
-      Dobby._log(`REPEAT: "${jobName}" remaining ${rem1}/${tot}`);
+      job.repeatRemaining = Math.max(0, (job.repeatRemaining ?? job.repeatTotal) - 1);
     }
     Dobby._persist();
     Dobby._log(`DONE: "${jobName}" completed=${done}, xp+${gained}`);
 
     if (Dobby.settings.autoRefreshAfterBatch && Dobby._alive(token)) {
-      Dobby._log('REFRESH workaround: saving state & reloading...');
       Dobby._saveForReload();
       setTimeout(() => location.reload(), Dobby.settings.refreshDelayMs || 1200);
       return;
@@ -633,27 +548,14 @@ export function installJobs() {
     let motAfter = motBefore;
     try { motAfter = await Dobby.getJobMotivation(job); } catch {}
     if (!Dobby._alive(token)) return;
-    const repeatsDone = !Dobby._isJobRunnable(job);
-    if (repeatsDone) {
-      Dobby._log(`ROTATE: repeats finished for "${jobName}" -> next job`);
+    
+    if (!Dobby._isJobRunnable(job) || Dobby._shouldRotate(motAfter, job.stopMotivation)) {
       const ni = Dobby._nextJobIndex();
       if (ni === -1) {
-        safeUserMsg('All jobs finished (repeats done).', window.UserMessage?.TYPE_HINT);
-        Dobby._log('STOP: all jobs finished by repeats.');
+        safeUserMsg('All jobs finished.', window.UserMessage?.TYPE_HINT);
         Dobby.stop();
         return;
       }
-    } else if (Dobby._shouldRotate(motAfter, job.stopMotivation)) {
-      Dobby._log(`ROTATE: "${jobName}" motivation now ${motAfter.toFixed(0)} <= limit ${job.stopMotivation} -> next job`);
-      const ni = Dobby._nextJobIndex();
-      if (ni === -1) {
-        safeUserMsg('All jobs finished (repeats done).', window.UserMessage?.TYPE_HINT);
-        Dobby._log('STOP: all jobs finished by repeats.');
-        Dobby.stop();
-        return;
-      }
-    } else {
-      Dobby._log(`KEEP: "${jobName}" motivation now ${motAfter.toFixed(0)} > limit ${job.stopMotivation} -> stay on same job`);
     }
     Dobby.render();
     Dobby.run(token);
@@ -691,7 +593,7 @@ export function installJobs() {
             Dobby.jobsLoaded = true;
             Dobby.allJobs = jobs;
             Dobby.findAllConsumables();
-            Dobby._log(`Map jobs loaded. Total raw entries=${jobs.length}. Consumables found=${Dobby.allConsumables.length}.`);
+            Dobby._log(`Map jobs loaded. Total raw entries=${jobs.length}.`);
             Dobby.openUI();
           }
         });
