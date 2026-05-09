@@ -161,19 +161,44 @@ export function installJobExecution() {
       const jobName = Dobby.getDisplayName(job);
       Dobby._log(`WALK: Starting "${jobName}" to town ${job.unitId}`);
 
-      const travelTimeSec = await Dobby.executeWalkToTown(job.unitId);
-      
-      if (travelTimeSec > 0) {
-        const waitMs = (travelTimeSec * 1000) + 2000; // Convert to ms + 2s safety buffer
-        Dobby._log(`Sleeping for ${(waitMs / 1000).toFixed(1)}s until arrival...`);
-        Dobby.currentState = 'walking';
-        Dobby.render();
-        await sleep(waitMs);
+      const payload = `tasks[0][unitId]=${job.unitId}&tasks[0][type]=town&tasks[0][taskType]=walk`;
+      const result = await Dobby._post('/game.php?window=task&action=add&h=' + (Dobby.settings.hToken || ''), payload);
+
+      // 1. Fix success check: Verify result exists, no error, and contains tasks array
+      if (result && !result.error && Array.isArray(result.tasks) && result.tasks.length > 0) {
+        const taskWrapper = result.tasks[0].task;
+        const wayData = taskWrapper?.data_obj?.wayData;
+        
+        // 2. Calculate Travel Time: Extract date_start and date_done (seconds)
+        const source = wayData || taskWrapper;
+        const start = Number(source?.date_start || 0);
+        const done = Number(source?.date_done || 0);
+        const travelTime = done - start;
+
+        // 3. Enhance Logging
+        Dobby._log(`WALK: ${done} - ${start} = ${travelTime.toFixed(1)} sec - to walk to town.`);
+        
+        if (travelTime > 0) {
+          safeUserMsg(`Walking to town. Arrival in ${Math.ceil(travelTime / 60)} minutes.`, window.UserMessage?.TYPE_HINT);
+        }
+
+        // 4. Wait Logic: Calculate wait time in ms from date_done vs Date.now()
+        let waitMs = 0;
+        if (done) {
+          waitMs = Math.max(0, (done * 1000) - Date.now()) + 2000; // +2s safety buffer
+        }
+
+        if (waitMs > 0) {
+          Dobby.currentState = 'walking';
+          Dobby.render();
+          await sleep(waitMs);
+        }
+      } else {
+        Dobby._log(`WALK: Failed to queue walk to "${jobName}": ${result?.msg || 'Unknown error'}`);
+        safeUserMsg(`Walk failed: ${jobName}`, window.UserMessage?.TYPE_ERROR);
       }
 
-      Dobby._log("[Tasker] Arrived at town! Moving to next queue item.");
-      
-      // Remove the town task from the queue
+      // 5. Safe Queue Removal: Ensure job is removed regardless of success/failure
       const idx = Dobby.addedJobs.indexOf(job);
       if (idx >= 0) Dobby.addedJobs.splice(idx, 1);
       if (Dobby.currentJobIndex >= idx && Dobby.currentJobIndex > 0) Dobby.currentJobIndex--;

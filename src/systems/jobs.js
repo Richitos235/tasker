@@ -371,48 +371,55 @@ export function installJobs() {
       const payload = `tasks[0][unitId]=${job.unitId}&tasks[0][type]=town&tasks[0][taskType]=walk`;
       const result = await Dobby._post('/game.php?window=task&action=add&h=' + (Dobby.settings.hToken || ''), payload);
 
-      if (result && !result.error) {
-        const duration = result.tasks?.[0]?.task?.data_obj?.duration;
-        if (duration) {
-          const mins = Math.round(duration / 60);
-          Dobby._log(`Walking to town. Arrival in ${mins} minutes.`);
-          safeUserMsg(`Walking to town. Arrival in ${mins} minutes.`, window.UserMessage?.TYPE_HINT);
+      // 1. Fix success check: Verify result exists, no error, and contains tasks array
+      if (result && !result.error && Array.isArray(result.tasks) && result.tasks.length > 0) {
+        const taskWrapper = result.tasks[0].task;
+        const wayData = taskWrapper?.data_obj?.wayData;
+        
+        // 2. Calculate Travel Time: Extract date_start and date_done (seconds)
+        const source = wayData || taskWrapper;
+        const start = Number(source?.date_start || 0);
+        const done = Number(source?.date_done || 0);
+        const travelTime = done - start;
+
+        // 3. Enhance Logging
+        Dobby._log(`WALK: ${done} - ${start} = ${travelTime.toFixed(1)} sec - to walk to town.`);
+        
+        if (travelTime > 0) {
+          safeUserMsg(`Walking to town. Arrival in ${Math.ceil(travelTime / 60)} minutes.`, window.UserMessage?.TYPE_HINT);
         }
 
-        let dateDone = result.tasks?.[0]?.task?.date_done;
+        // 4. Wait Logic: Calculate wait time in ms from date_done vs Date.now()
         let waitMs = 0;
-        if (dateDone) {
-          const doneTs = Number(dateDone) * 1000;
-          waitMs = Math.max(0, doneTs - Date.now());
+        if (done) {
+          waitMs = Math.max(0, (done * 1000) - Date.now()) + 2000; // +2s safety buffer
         }
 
         if (waitMs > 0) {
           Dobby.currentState = 'walking';
+          Dobby.render();
           await sleep(waitMs);
         }
-
-        const idx = Dobby.addedJobs.indexOf(job);
-        if (idx >= 0) Dobby.addedJobs.splice(idx, 1);
-        if (Dobby.currentJobIndex >= idx && Dobby.currentJobIndex > 0) Dobby.currentJobIndex--;
-        Dobby._persist();
-
-        Dobby.currentState = 'running';
-        const ni = Dobby._nextJobIndex();
-        if (ni === -1) {
-          safeUserMsg('All tasks finished.', window.UserMessage?.TYPE_HINT);
-          Dobby.stop();
-          return;
-        }
-        Dobby.run(token);
-        return;
       } else {
         Dobby._log(`WALK: Failed to queue walk to "${jobName}": ${result?.msg || 'Unknown error'}`);
         safeUserMsg(`Walk failed: ${jobName}`, window.UserMessage?.TYPE_ERROR);
-        const ni = Dobby._nextJobIndex();
-        if (ni === -1) { Dobby.stop(); return; }
-        Dobby.run(token);
+      }
+
+      // 5. Safe Queue Removal: Ensure job is removed regardless of success/failure
+      const idx = Dobby.addedJobs.indexOf(job);
+      if (idx >= 0) Dobby.addedJobs.splice(idx, 1);
+      if (Dobby.currentJobIndex >= idx && Dobby.currentJobIndex > 0) Dobby.currentJobIndex--;
+      Dobby._persist();
+
+      Dobby.currentState = 'running';
+      const ni = Dobby._nextJobIndex();
+      if (ni === -1) {
+        safeUserMsg('All tasks finished.', window.UserMessage?.TYPE_HINT);
+        Dobby.stop();
         return;
       }
+      Dobby.run(token);
+      return;
     }
 
     const jobName = Dobby.getDisplayName(job);
