@@ -1,0 +1,185 @@
+// ==UserScript==
+// @name        The West - Town Catcher & Walker (FINAL FIX)
+// @namespace   Violentmonkey Scripts
+// @match       https://*.the-west.net/game.php*
+// @grant       none
+// @version     1.5
+// @author      Gemini
+// @description Improved JSON parsing to prevent "No travel data" errors.
+// ==/UserScript==
+
+(function() {
+    'use strict';
+
+    let townList = JSON.parse(localStorage.getItem('tw_captured_towns') || '[]');
+
+    function saveTowns() {
+        localStorage.setItem('tw_captured_towns', JSON.stringify(townList));
+    }
+
+    function getAuthHash() {
+        if (typeof window.Player !== 'undefined' && window.Player.h) return window.Player.h;
+        const match = document.documentElement.innerHTML.match(/h=([a-f0-9]+)/);
+        return match ? match[1] : '';
+    }
+
+    // --- UI Creation ---
+    const container = document.createElement('div');
+    container.style = `position: fixed; top: 150px; left: 150px; width: 400px; max-height: 450px;
+        background: #dbc08d url(/images/window/content_bg.png); border: 3px solid #634731; border-radius: 8px;
+        z-index: 9999; display: none; flex-direction: column; color: #3b2413; font-family: "Trebuchet MS", sans-serif;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.7);`;
+
+    const header = document.createElement('div');
+    header.style = `background: #634731; color: #f1e0ad; padding: 10px; font-weight: bold; cursor: move;
+        display: flex; justify-content: space-between; align-items: center; text-transform: uppercase;`;
+    header.innerHTML = '<span>Town Navigator</span><span id="close-tw-win" style="cursor:pointer; font-size: 20px;">&times;</span>';
+
+    const content = document.createElement('div');
+    content.style = 'padding: 10px; overflow-y: auto; flex-grow: 1;';
+
+    const table = document.createElement('table');
+    table.style = 'width: 100%; border-collapse: collapse;';
+    table.innerHTML = `<thead><tr style="background: #634731; color: #f1e0ad; font-size: 11px;">
+        <th style="padding: 5px; text-align: left;">Town</th>
+        <th style="padding: 5px;">Coords</th>
+        <th style="padding: 5px; text-align: right;">Action</th>
+    </tr></thead><tbody id="town-table-body"></tbody>`;
+
+    content.appendChild(table);
+    container.appendChild(header);
+    container.appendChild(content);
+    document.body.appendChild(container);
+
+    const toggleBtn = document.createElement('div');
+    toggleBtn.innerHTML = 'TOWNS';
+    toggleBtn.style = `position: fixed; bottom: 50px; right: 20px; width: 70px; height: 30px;
+        background: #634731; border: 2px solid #f1e0ad; color: #f1e0ad; text-align: center;
+        line-height: 26px; cursor: pointer; font-weight: bold; z-index: 9998; border-radius: 5px; font-size: 11px;`;
+    toggleBtn.onclick = () => container.style.display = container.style.display === 'none' ? 'flex' : 'none';
+    document.body.appendChild(toggleBtn);
+
+    document.getElementById('close-tw-win').onclick = () => container.style.display = 'none';
+
+    // --- Drag Logic ---
+    let isDragging = false, offset = [0,0];
+    header.onmousedown = (e) => { isDragging = true; offset = [container.offsetLeft - e.clientX, container.offsetTop - e.clientY]; };
+    document.onmousemove = (e) => { if (isDragging) { container.style.left = (e.clientX + offset[0]) + 'px'; container.style.top = (e.clientY + offset[1]) + 'px'; } };
+    document.onmouseup = () => isDragging = false;
+
+    // --- Deep Search Helper ---
+    function findWayData(obj) {
+        if (!obj || typeof obj !== 'object') return null;
+        if (obj.wayData) return obj.wayData;
+        for (let key in obj) {
+            let found = findWayData(obj[key]);
+            if (found) return found;
+        }
+        return null;
+    }
+
+    // --- Travel Function ---
+    async function walkToTown(townId, btn) {
+        const h = getAuthHash();
+        const url = `https://${window.location.hostname}/game.php?window=task&action=add&h=${h}`;
+        const body = `tasks%5B0%5D%5BunitId%5D=${townId}&tasks%5B0%5D%5Btype%5D=town&tasks%5B0%5D%5BtaskType%5D=walk`;
+
+        btn.disabled = true;
+        btn.innerHTML = "...";
+
+        try {
+            const res = await fetch(url, {
+                method: 'POST',
+                headers: {
+                    'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+                    'x-requested-with': 'XMLHttpRequest'
+                },
+                body: body
+            });
+
+            const result = await res.json();
+
+            // Search for travel data anywhere in the response
+            const wayData = findWayData(result);
+
+            if (wayData && wayData.date_done) {
+                let duration = Math.round(wayData.date_done - wayData.date_start);
+                if (duration < 1) duration = 1; // Fallback for instant travel
+
+                btn.style.background = "#ff9800";
+
+                const timer = setInterval(() => {
+                    if (duration <= 0) {
+                        clearInterval(timer);
+                        btn.innerHTML = "Arrived";
+                        btn.style.background = "#4CAF50";
+                        setTimeout(() => {
+                            btn.innerHTML = "Walk";
+                            btn.disabled = false;
+                            btn.style.background = "#8b6d4d";
+                        }, 2000);
+                    } else {
+                        let m = Math.floor(duration / 60);
+                        let s = duration % 60;
+                        btn.innerHTML = `${m}:${s < 10 ? '0' : ''}${s}`;
+                        duration--;
+                    }
+                }, 1000);
+            } else {
+                // If we get a response but no wayData, player might already be there
+                btn.innerHTML = "Done!";
+                btn.style.background = "#4CAF50";
+                setTimeout(() => { btn.innerHTML = "Walk"; btn.disabled = false; btn.style.background = "#8b6d4d"; }, 2000);
+            }
+        } catch (e) {
+            btn.innerHTML = "Error";
+            btn.style.background = "#f44336";
+            console.error("Walk Error:", e);
+            setTimeout(() => { btn.innerHTML = "Walk"; btn.disabled = false; btn.style.background = "#8b6d4d"; }, 2000);
+        }
+    }
+
+    function renderTable() {
+        const tbody = document.getElementById('town-table-body');
+        tbody.innerHTML = '';
+        townList.forEach((town, index) => {
+            const row = tbody.insertRow();
+            row.style.borderBottom = "1px solid rgba(74, 53, 37, 0.2)";
+            row.innerHTML = `<td style="padding: 8px; font-size: 12px;"><strong>${town.town_name}</strong></td>
+                             <td style="padding: 8px; font-size: 11px;">${town.town_x}/${town.town_y}</td>
+                             <td style="padding: 8px; text-align: right;"></td>`;
+
+            const walkBtn = document.createElement('button');
+            walkBtn.innerHTML = "Walk";
+            walkBtn.style = "background: #8b6d4d; color: #fff; border: 1px solid #3b2413; border-radius: 3px; cursor: pointer; padding: 3px 8px; font-size: 11px; width: 65px;";
+            walkBtn.onclick = () => walkToTown(town.town_id, walkBtn);
+
+            const delBtn = document.createElement('span');
+            delBtn.innerHTML = " ❌";
+            delBtn.style = "cursor: pointer; font-size: 10px; opacity: 0.5; margin-left: 5px;";
+            delBtn.onclick = () => { townList.splice(index, 1); saveTowns(); renderTable(); };
+
+            row.cells[2].appendChild(walkBtn);
+            row.cells[2].appendChild(delBtn);
+        });
+    }
+
+    const oldOpen = XMLHttpRequest.prototype.open;
+    XMLHttpRequest.prototype.open = function() {
+        this.addEventListener('load', function() {
+            if (this.responseURL.includes('mode=get_town')) {
+                try {
+                    const data = JSON.parse(this.responseText);
+                    if (data.town_id && !townList.find(t => t.town_id === data.town_id)) {
+                        townList.unshift({ town_id: data.town_id, town_name: data.town_name, town_x: data.town_x, town_y: data.town_y });
+                        saveTowns();
+                        renderTable();
+                    }
+                } catch (e) {}
+            }
+        });
+        return oldOpen.apply(this, arguments);
+    };
+
+    renderTable();
+})();
